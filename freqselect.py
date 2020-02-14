@@ -1,16 +1,517 @@
+import emg3d
+import empymod
 import numpy as np
-import empymod as epm
 import ipywidgets as widgets
 import scipy.interpolate as si
 import matplotlib.pyplot as plt
 from IPython.display import display
 from scipy.signal import find_peaks
-from scipy.interpolate import InterpolatedUnivariateSpline as iuSpline
 
 # Define all errors we want to catch with the variable-checks and setting of
 # default values. This is not perfect, but better than 'except Exception'.
 VariableCatch = (LookupError, AttributeError, ValueError, TypeError, NameError)
 
+
+# Interactive Frequency Selection
+
+class InteractiveFrequency(emg3d.utils.Fourier):
+    """App to create required frequencies for Fourier Transform."""
+
+    def __init__(self, src_z, rec_z, depth, res, time, signal=0, ab=11,
+                 aniso=None, **kwargs):
+        """App to create required frequencies for Fourier Transform.
+
+        No thorough input checks are carried out. Rubbish in, rubbish out.
+
+        See empymod.model.dipole for details regarding the modelling.
+
+
+        Parameters
+        ----------
+        src_z, rec_z : floats
+            Source and receiver depths and offset. The source is located at
+            src=(0, 0, src_z), the receiver at rec=(off, 0, rec_z).
+
+        depth : list
+            Absolute layer interfaces z (m); #depth = #res - 1
+            (excluding +/- infinity).
+
+        res : array_like
+            Horizontal resistivities rho_h (Ohm.m); #res = #depth + 1.
+
+        time : array_like
+            Times t (s).
+
+        signal : {0, 1, -1}, optional
+            Source signal, default is 0:
+                - -1 : Switch-off time-domain response
+                - 0 : Impulse time-domain response
+                - +1 : Switch-on time-domain response
+
+        ab : int, optional
+            Source-receiver configuration, defaults to 11. (See
+            empymod.model.dipole for all possibilities.)
+
+        aniso : array_like, optional
+            Anisotropies lambda = sqrt(rho_v/rho_h) (-); #aniso = #res.
+            Defaults to ones.
+
+        ft : {'sin', 'cos'}, optional
+            Flag to choose either the Sine or Cosine Digital Linear Filter
+            method.  Defaults to 'sin'.
+            If signal is < 0, it is set to cosine. If signal > 0, it is set to
+            sine. Both can be used for signal = 0.
+
+        ftarg : dict or list, optional
+            [fftfilt, pts_per_dec]:
+
+            - fftfilt: string of filter name in ``empymod.filters`` or the
+                       filter method itself. (Default:
+                       ``empymod.filters.key_201_CosSin_2012()``)
+            - pts_per_dec: points per decade; (default: 4)
+                - If 0: Standard DLF.
+                - If < 0: Lagged Convolution DLF.
+                - If > 0: Splined DLF
+
+            The values can be provided as dict with the keywords, or as list.
+            However, if provided as list, you have to follow the order given
+            above.
+
+        **kwargs : Optional parameters:
+
+            - ``fmin`` : float
+              Initial minimum frequency. Default is 1e-3.
+
+            - ``fmax`` : float
+              Initial maximum frequency. Default is 1e1.
+
+            - ``off`` : float
+              Initial offset. Default is 500.
+
+            - ``ft`` : str {'sin', 'cos', 'fftlog'}
+              Initial Fourier transform method. Default is 'sin'.
+
+            - ``ftarg`` : dict
+              Initial Fourier transform arguments corresponding to ``ft``.
+              Default is None.
+
+            - ``pts_per_dec`` : int
+              Initial points per decade. Default is 5.
+
+            - ``linlog`` : str {'linear', 'log'}
+              Initial display scaling. Default is 'linear'.
+
+            - ``xtfact`` : float
+              Factor for linear x-dimension: t_max = xtfact*offset/1000.
+
+            - ``verb`` : int
+              Verbosity. Only for debugging purposes.
+
+        """
+        # Get initial values or set to default.
+        fmin = kwargs.pop('fmin', 1e-3)
+        fmax = kwargs.pop('fmax', 1e1)
+        off = kwargs.pop('off', 5000)
+        ft = kwargs.pop('ft', 'sin')
+        ftarg = kwargs.pop('ftarg', None)
+        self.pts_per_dec = kwargs.pop('pts_per_dec', 5)
+        self.linlog = kwargs.pop('linlog', 'linear')
+        self.xtfact = kwargs.pop('xtfact', 1)
+        self.verb = kwargs.pop('verb', 1)
+
+        # Ensure no kwargs left.
+        if kwargs:
+            raise TypeError('Unexpected **kwargs: %r' % kwargs)
+
+        # Collect model from input.
+        self.model = {
+            'src': [0, 0, src_z],
+            'rec': [off, 0, rec_z],
+            'depth': depth,
+            'res': res,
+            'aniso': aniso,
+            'ab': ab,
+            'verb': self.verb,
+        }
+
+        # Initiate a Fourier instance.
+        super().__init__(time, fmin, fmax, signal, ft, ftarg, verb=self.verb)
+
+        # Create the figure.
+        self.initiate_figure()
+
+    def initiate_figure(self):
+        """Create the figure."""
+
+        # Create figure and all axes
+        fig = plt.figure(f"Interactive frequency selection for the Fourier "
+                         f"Transform.", figsize=(9, 4))
+        plt.subplots_adjust(hspace=0.03, wspace=0.04, bottom=0.15, top=0.9)
+        # plt.tight_layout(rect=[0, 0, 1, 0.95])  # Leave space for suptitle.
+        ax1 = plt.subplot2grid((3, 2), (0, 0), rowspan=2)
+        plt.grid('on', alpha=0.4)
+        ax2 = plt.subplot2grid((3, 2), (0, 1), rowspan=2)
+        plt.grid('on', alpha=0.4)
+        ax3 = plt.subplot2grid((3, 2), (2, 0))
+        plt.grid('on', alpha=0.4)
+        ax4 = plt.subplot2grid((3, 2), (2, 1))
+        plt.grid('on', alpha=0.4)
+
+        # Synchronize x-axis, switch upper labels off
+        ax1.get_shared_x_axes().join(ax1, ax3)
+        ax2.get_shared_x_axes().join(ax2, ax4)
+        plt.setp(ax1.get_xticklabels(), visible=False)
+        plt.setp(ax2.get_xticklabels(), visible=False)
+
+        # Move labels of t-domain to the right
+        ax2.yaxis.set_ticks_position('right')
+        ax4.yaxis.set_ticks_position('right')
+
+        # Set fixed limits
+        ax1.set_xscale('log')
+        ax3.set_yscale('log')
+        ax3.set_yscale('log')
+        ax3.set_ylim([0.007, 141])
+        ax3.set_yticks([0.01, 0.1, 1, 10, 100])
+        ax3.set_yticklabels(('0.01', '0.1', '1', '10', '100'))
+        ax4.set_yscale('log')
+        ax4.set_yscale('log')
+        ax4.set_ylim([0.007, 141])
+        ax4.set_yticks([0.01, 0.1, 1, 10, 100])
+        ax4.set_yticklabels(('0.01', '0.1', '1', '10', '100'))
+
+        # Labels etc
+        ax1.set_ylabel('Amplitude (V/m)')
+        ax3.set_ylabel('Rel. Error (%)')
+        ax3.set_xlabel('Frequency (Hz)')
+        ax4.set_xlabel('Time (s)')
+        ax3.axhline(1, c='k')
+        ax4.axhline(1, c='k')
+
+        # Add instances
+        self.fig = fig
+        self.axs = [ax1, ax2, ax3, ax4]
+
+        # Plot initial base model
+        self.update_ftfilt(self.ftarg)
+        self.plot_base_model()
+
+        # Initiate the widgets
+        self.create_widget()
+
+    def reim(self, inp):
+        """Return real or imaginary part as a function of signal."""
+        if self.signal < 0:
+            return inp.real
+        else:
+            return inp.imag
+
+    def create_widget(self):
+        """Create widgets and their layout."""
+
+        # Offset slider.
+        off = widgets.interactive(
+            self.update_off,
+            off=widgets.IntSlider(
+                min=500,
+                max=10000,
+                description='Offset (m)',
+                value=self.model['rec'][0],
+                step=250,
+                continuous_update=False,
+                style={'description_width': '60px'},
+                layout={'width': '260px'},
+            ),
+        )
+
+        # Pts/dec slider.
+        pts_per_dec = widgets.interactive(
+            self.update_pts_per_dec,
+            pts_per_dec=widgets.IntSlider(
+                min=1,
+                max=10,
+                description='pts/dec',
+                value=self.pts_per_dec,
+                step=1,
+                continuous_update=False,
+                style={'description_width': '60px'},
+                layout={'width': '260px'},
+            ),
+        )
+
+        # Linear/logarithmic selection.
+        linlog = widgets.interactive(
+            self.update_linlog,
+            linlog=widgets.ToggleButtons(
+                value=self.linlog,
+                options=['linear', 'log'],
+                description='Display',
+                style={'description_width': '60px', 'button_width': '100px'},
+            ),
+        )
+
+        # Frequency-range slider.
+        freq_range = widgets.interactive(
+            self.update_freq_range,
+            freq_range=widgets.FloatRangeSlider(
+                value=[np.log10(self.fmin), np.log10(self.fmax)],
+                description='f-range',
+                min=-4,
+                max=3,
+                step=0.1,
+                continuous_update=False,
+                style={'description_width': '60px'},
+                layout={'width': '260px'},
+            ),
+        )
+
+        # Signal selection (-1, 0, 1).
+        signal = widgets.interactive(
+            self.update_signal,
+            signal=widgets.ToggleButtons(
+                value=self.signal,
+                options=[-1, 0, 1],
+                description='Signal',
+                style={'description_width': '60px', 'button_width': '65px'},
+            ),
+        )
+
+        # Fourier transform method selection.
+        def _get_init():
+            """Return initial choice of Fourier Transform."""
+            if self.ft == 'fftlog':
+                return self.ft
+            else:
+                return self.ftarg[0].savename
+
+        ftfilt = widgets.interactive(
+            self.update_ftfilt,
+            ftfilt=widgets.Dropdown(
+                options=['fftlog', 'key_81_CosSin_2009',
+                         'key_241_CosSin_2009', 'key_601_CosSin_2009',
+                         'key_101_CosSin_2012', 'key_201_CosSin_2012'],
+                description='Fourier',
+                value=_get_init(),  # Initial value
+                style={'description_width': '60px'},
+                layout={'width': 'max-content'},
+            ),
+        )
+
+        # Group them together.
+        t1col1 = widgets.VBox(children=[pts_per_dec, freq_range],
+                              layout={'width': '310px'})
+        t1col2 = widgets.VBox(children=[off, ftfilt],
+                              layout={'width': '310px'})
+        t1col3 = widgets.VBox(children=[signal, linlog],
+                              layout={'width': '310px'})
+
+        # Group them together.
+        display(widgets.HBox(children=[t1col1, t1col2, t1col3]))
+
+    # Plotting and calculation routines.
+    def clear_handle(self, handles):
+        """Clear `handles` from figure."""
+        for hndl in handles:
+            if hasattr(self, 'h_'+hndl):
+                getattr(self, 'h_'+hndl).remove()
+
+    def adjust_lim(self):
+        """Adjust axes limits."""
+
+        # Adjust y-limits f-domain
+        if self.linlog == 'linear':
+            self.axs[0].set_ylim([1.1*min(self.reim(self.f_dense)),
+                                  1.5*max(self.reim(self.f_dense))])
+        else:
+            self.axs[0].set_ylim([5*min(self.reim(self.f_dense)),
+                                  5*max(self.reim(self.f_dense))])
+
+        # Adjust x-limits f-domain
+        self.axs[0].set_xlim([min(self.freq_req), max(self.freq_req)])
+
+        # Adjust y-limits t-domain
+        if self.linlog == 'linear':
+            self.axs[1].set_ylim(
+                    [min(-max(self.t_base)/20, 0.9*min(self.t_base)),
+                     max(-min(self.t_base)/20, 1.1*max(self.t_base))])
+        else:
+            self.axs[1].set_ylim([10**(np.log10(max(self.t_base))-5),
+                                  1.5*max(self.t_base)])
+
+        # Adjust x-limits t-domain
+        if self.linlog == 'linear':
+            if self.signal == 0:
+                self.axs[1].set_xlim(
+                        [0, self.xtfact*self.model['rec'][0]/1000])
+            else:
+                self.axs[1].set_xlim([0, max(self.time)])
+        else:
+            self.axs[1].set_xlim([min(self.time), max(self.time)])
+
+    def print_suptitle(self):
+        """Update suptitle."""
+        plt.suptitle(
+            f"Offset = {np.squeeze(self.model['rec'][0])/1000} km;    "
+            f"No. freq. coarse: {self.freq_calc.size};    No. freq. full: "
+            f"{self.freq_req.size}  ({self.freq_req.min():.1e} $-$ "
+            f"{self.freq_req.max():.1e} Hz)")
+
+    def plot_base_model(self):
+        """Update smooth, 'correct' model."""
+
+        # Calculate responses
+        self.f_dense = empymod.dipole(freqtime=self.freq_dense, **self.model)
+        self.t_base = empymod.dipole(
+            freqtime=self.time, signal=self.signal, **self.model)
+
+        # Clear existing handles
+        self.clear_handle(['f_base', 't_base'])
+
+        # Plot new result
+        self.h_f_base, = self.axs[0].plot(
+                self.freq_dense, self.reim(self.f_dense), 'C3')
+        self.h_t_base, = self.axs[1].plot(self.time, self.t_base, 'C3')
+
+        self.adjust_lim()
+
+    def plot_coarse_model(self):
+        """Update coarse model."""
+
+        # Calculate the f-responses for required and the calculation range.
+        f_req = empymod.dipole(freqtime=self.freq_req, **self.model)
+        f_calc = empymod.dipole(freqtime=self.freq_calc, **self.model)
+
+        # Interpolate from calculated to required frequencies and transform.
+        f_int = self.interpolate(f_calc)
+        t_int = self.freq2time(f_calc, self.model['rec'][0])
+
+        # Calculate the errors.
+        f_error = np.clip(100*abs((self.reim(f_int)-self.reim(f_req)) /
+                                  self.reim(f_req)), 0.01, 100)
+        t_error = np.clip(100*abs((t_int-self.t_base)/self.t_base), 0.01, 100)
+
+        # Clear existing handles
+        self.clear_handle(['f_int', 't_int', 'f_inti', 'f_inte', 't_inte'])
+
+        # Plot frequency-domain result
+        self.h_f_inti, = self.axs[0].plot(
+                self.freq_req, self.reim(f_int), 'k.', ms=4)
+        self.h_f_int, = self.axs[0].plot(
+                self.freq_calc, self.reim(f_calc), 'C0.', ms=8)
+        self.h_f_inte, = self.axs[2].plot(self.freq_req, f_error, 'k.')
+
+        # Plot time-domain result
+        self.h_t_int, = self.axs[1].plot(self.time, t_int, 'k--')
+        self.h_t_inte, = self.axs[3].plot(self.time, t_error, 'k.')
+
+        # Update suptitle
+        self.print_suptitle()
+
+    # Interactive routines
+    def update_off(self, off):
+        """Offset-slider"""
+
+        # Update model
+        self.model['rec'] = [off, self.model['rec'][1], self.model['rec'][2]]
+
+        # Redraw models
+        self.plot_base_model()
+        self.plot_coarse_model()
+
+    def update_pts_per_dec(self, pts_per_dec):
+        """pts_per_dec-slider."""
+
+        # Store pts_per_dec.
+        self.pts_per_dec = pts_per_dec
+
+        # Redraw through update_ftfilt.
+        self.update_ftfilt(self.ftarg)
+
+    def update_freq_range(self, freq_range):
+        """Freq-range slider."""
+
+        # Update values
+        self.fmin = 10**freq_range[0]
+        self.fmax = 10**freq_range[1]
+
+        # Redraw models
+        self.plot_coarse_model()
+
+    def update_ftfilt(self, ftfilt):
+        """Ftfilt dropdown."""
+
+        # Check if FFTLog or DLF; git DLF filter.
+        if isinstance(ftfilt, str):
+            fftlog = ftfilt == 'fftlog'
+        else:
+            if hasattr(ftfilt[0], 'savename'):
+                fftlog = False
+                ftfilt = ftfilt[0].savename
+            else:
+                fftlog = True
+
+        # Update Fourier arguments.
+        if fftlog:
+            self.fourier_arguments('fftlog', {'pts_per_dec': self.pts_per_dec})
+            self.freq_inp = None
+
+        else:
+            # Calculate input frequency from min to max with pts_per_dec.
+            lmin = np.log10(self.freq_req.min())
+            lmax = np.log10(self.freq_req.max())
+            self.freq_inp = np.logspace(
+                    lmin, lmax, int(self.pts_per_dec*np.ceil(lmax-lmin)))
+
+            self.fourier_arguments(
+                    'sin', {'fftfilt': ftfilt, 'pts_per_dec': -1})
+
+        # Dense frequencies for comparison reasons
+        self.freq_dense = np.logspace(np.log10(self.freq_req.min()),
+                                      np.log10(self.freq_req.max()), 301)
+
+        # Redraw models
+        self.plot_base_model()
+        self.plot_coarse_model()
+
+    def update_linlog(self, linlog):
+        """Adjust x- and y-scaling of both frequency- and time-domain."""
+
+        # Store linlog
+        self.linlog = linlog
+
+        # f-domain: x-axis always log; y-axis linear or symlog.
+        if linlog == 'log':
+            sym_dec = 10  # Number of decades to show on symlog
+            lty = int(max(np.log10(abs(self.reim(self.f_dense))))-sym_dec)
+            self.axs[0].set_yscale('symlog', linthreshy=10**lty, linscaley=0.7)
+
+            # Remove the zero line becouse of the overlapping ticklabels.
+            nticks = len(self.axs[0].get_yticks())//2
+            iticks = np.arange(nticks)
+            iticks = np.r_[iticks, iticks+nticks+1]
+            self.axs[0].set_yticks(self.axs[0].get_yticks()[iticks])
+
+        else:
+            self.axs[0].set_yscale(linlog)
+
+        # t-domain: either linear or loglog
+        self.axs[1].set_yscale(linlog)
+        self.axs[1].set_xscale(linlog)
+
+        # Adjust limits
+        self.adjust_lim()
+
+    def update_signal(self, signal):
+        """Use signal."""
+
+        # Store signal.
+        self.signal = signal
+
+        # Redraw through update_ftfilt.
+        self.update_ftfilt(self.ftarg)
+
+
+# Routines for the Adaptive Frequency Selection
 
 def get_new_freq(freq, field, rtol, req_freq=None, full_output=False):
     r"""Returns next frequency to calculate.
@@ -134,15 +635,16 @@ def design_freq_range(time, model, rtol, signal, freq_range, xlim_freq=None,
     """GUI to design required frequencies for Fourier transform."""
 
     # Get required frequencies for provided time and ft, verbose.
-    time, req_freq, ft, ftarg = epm.utils.check_time(
+    time, req_freq, ft, ftarg = empymod.utils.check_time(
         time=time, signal=signal, ft=model.get('ft', 'sin'),
         ftarg=model.get('ftarg', 0), verb=3
     )
     req_freq, ri = np.unique(req_freq, return_inverse=True)
 
     # Use empymod-utilities to print frequency range.
-    mod = epm.utils.check_model([], 1, None, None, None, None, None, False, 0)
-    _ = epm.utils.check_frequency(req_freq, *mod[1:-1], 3)
+    mod = empymod.utils.check_model(
+            [], 1, None, None, None, None, None, False, 0)
+    _ = empymod.utils.check_frequency(req_freq, *mod[1:-1], 3)
 
     # Calculate "good" f- and t-domain field.
     fine_model = model.copy()
@@ -153,8 +655,8 @@ def design_freq_range(time, model, rtol, signal, freq_range, xlim_freq=None,
     fine_model['htarg'] = {'pts_per_dec': -1}
     fine_model['ft'] = 'sin'
     fine_model['ftarg'] = {'pts_per_dec': -1}
-    sfEM = epm.dipole(freqtime=req_freq, **fine_model)
-    stEM = epm.dipole(freqtime=time, signal=signal, **fine_model)
+    sfEM = empymod.dipole(freqtime=req_freq, **fine_model)
+    stEM = empymod.dipole(freqtime=time, signal=signal, **fine_model)
 
     # Define initial frequencies.
     if isinstance(freq_range, tuple):
@@ -252,7 +754,7 @@ def design_freq_range(time, model, rtol, signal, freq_range, xlim_freq=None,
     while len(new_freq) > 0:
 
         # Calculate fEM for new frequencies.
-        new_fEM = epm.dipole(freqtime=new_freq, **model)
+        new_fEM = empymod.dipole(freqtime=new_freq, **model)
 
         # Combine existing and new frequencies and fEM.
         freq, ai = np.unique(np.r_[freq, new_freq], return_index=True)
@@ -294,8 +796,9 @@ def design_freq_range(time, model, rtol, signal, freq_range, xlim_freq=None,
 
         # 2. Carry out the actual Fourier transform.
         #    (without checking for QWE convergence.)
-        tEM, _ = epm.model.tem(sfEM[:, None], model['rec'][0], freq=req_freq,
-                               time=time, signal=signal, ft=ft, ftarg=ftarg)
+        tEM, _ = empymod.model.tem(
+                sfEM[:, None], model['rec'][0], freq=req_freq, time=time,
+                signal=signal, ft=ft, ftarg=ftarg)
 
         # Reshape and return
         nrec, nsrc = 1, 1
@@ -346,537 +849,3 @@ def design_freq_range(time, model, rtol, signal, freq_range, xlim_freq=None,
     # Return time-domain signal (correspond to provided times); also
     # return used frequencies and corresponding signal.
     return tEM, freq, fEM
-
-
-class InteractiveFrequency:
-    """App to create required frequencies for Fourier Transform."""
-
-    def __init__(self, src_z, rec_z, depth, res, time, signal=0, ab=11,
-                 aniso=None, ft='sin', ftarg=['key_201_CosSin_2012', '4']):
-        """App to create required frequencies for Fourier Transform.
-
-        No thorough input checks are carried out. Rubbish in, rubbish out.
-
-        See empymod.model.dipole for detail regarding the modelling.
-
-
-        Parameters
-        ----------
-        src_z, rec_z : floats
-            Source and receiver depths and offset. The source is located at
-            src=(0, 0, src_z), the receiver at rec=(off, 0, rec_z).
-
-        depth : list
-            Absolute layer interfaces z (m); #depth = #res - 1
-            (excluding +/- infinity).
-
-        res : array_like
-            Horizontal resistivities rho_h (Ohm.m); #res = #depth + 1.
-
-        time : array_like
-            Times t (s).
-
-        signal : {0, 1, -1}, optional
-            Source signal, default is 0:
-                - -1 : Switch-off time-domain response
-                - 0 : Impulse time-domain response
-                - +1 : Switch-on time-domain response
-
-        ab : int, optional
-            Source-receiver configuration, defaults to 11. (See
-            empymod.model.dipole for all possibilities.)
-
-        aniso : array_like, optional
-            Anisotropies lambda = sqrt(rho_v/rho_h) (-); #aniso = #res.
-            Defaults to ones.
-
-        ft : {'sin', 'cos'}, optional
-            Flag to choose either the Sine or Cosine Digital Linear Filter
-            method.  Defaults to 'sin'.
-            If signal is < 0, it is set to cosine. If signal > 0, it is set to
-            sine. Both can be used for signal = 0.
-
-        ftarg : dict or list, optional
-            [fftfilt, pts_per_dec]:
-
-            - fftfilt: string of filter name in ``empymod.filters`` or the
-                       filter method itself. (Default:
-                       ``empymod.filters.key_201_CosSin_2012()``)
-            - pts_per_dec: points per decade; (default: 4)
-                - If 0: Standard DLF.
-                - If < 0: Lagged Convolution DLF.
-                - If > 0: Splined DLF
-
-            The values can be provided as dict with the keywords, or as list.
-            However, if provided as list, you have to follow the order given
-            above.
-
-        """
-
-        # Check and store input.
-        self.signal = signal
-        self.ft = 'cos'
-        if signal == -1:
-            self.reim = np.real
-            self.ft = 'cos'
-        elif signal == 1:
-            self.reim = np.imag
-            self.ft = 'sin'
-        elif signal == 0:
-            if self.ft == 'cos':
-                self.reim = np.real
-            else:
-                self.reim = np.imag
-        else:
-            print('Signal must be in {-., 0, 1}.')
-            raise
-        self.time = time
-        self.ftfilt = ftarg[0]
-        self.pts_per_dec = ftarg[1]
-
-        # Define model from input.
-        self.model = {
-            'src': [0, 0, src_z],
-            'rec': [5000, 0, rec_z],
-            'depth': depth,
-            'res': res,
-            'aniso': aniso,
-            'ab': ab,
-            'verb': 1,
-        }
-
-        # Default values
-        self.linlog = 'linear'
-        self.min_freq = 1e-3
-        self.max_freq = 1e1
-        self.use_end = True
-        self.int_type = 0
-        self.pts_per_dec_full = -1
-
-        # Create figure and all axes
-        fig = plt.figure(f"Interactive frequency selection for the Fourier "
-                         f"Transform with DLF.", figsize=(9, 4))
-        plt.subplots_adjust(hspace=0.02, wspace=0.05)
-        ax1 = plt.subplot2grid((3, 2), (0, 0), rowspan=2)
-        ax2 = plt.subplot2grid((3, 2), (0, 1), rowspan=2)
-        ax3 = plt.subplot2grid((3, 2), (2, 0))
-        ax4 = plt.subplot2grid((3, 2), (2, 1))
-
-        # Synchronize x-axis, switch upper labels off
-        ax1.get_shared_x_axes().join(ax1, ax3)
-        ax2.get_shared_x_axes().join(ax2, ax4)
-        plt.setp(ax1.get_xticklabels(), visible=False)
-        plt.setp(ax2.get_xticklabels(), visible=False)
-
-        # Move labels of t-domain to the right
-        ax2.yaxis.set_ticks_position('right')
-        ax2.yaxis.set_label_position('right')
-        ax4.yaxis.set_ticks_position('right')
-        ax4.yaxis.set_label_position('right')
-
-        # Set fixed limits
-        ax1.set_xscale('log')
-        ax3.set_yscale('log')
-        ax3.set_yscale('log')
-        ax3.set_ylim([0.007, 141])
-        ax3.set_yticks([0.01, 0.1, 1, 10, 100])
-        ax4.set_yscale('log')
-        ax4.set_yscale('log')
-        ax4.set_ylim([0.007, 141])
-        ax4.set_yticks([0.01, 0.1, 1, 10, 100])
-
-        # Labels etc
-        ax1.set_ylabel('Amplitude (V/m)')
-        ax2.set_ylabel('Amplitude (V/m)')
-        ax3.set_ylabel('Error (%)')
-        ax3.set_xlabel('Frequency (Hz)')
-        ax4.set_ylabel('Error (%)')
-        ax4.set_xlabel('Time (s)')
-        ax3.axhline(1, c='k')
-        ax4.axhline(1, c='k')
-
-        plt.style.use('ggplot')
-
-        # Add instances
-        self.fig = fig
-        self.axs = [ax1, ax2, ax3, ax4]
-
-        # Plot initial base model
-        self.plot_base_model()
-
-        # Initiate the widgets
-        self.create_widget()
-
-    def create_widget(self):
-        """Create widgets and their layout."""
-        off = widgets.interactive(
-            self.update_off,
-            off=widgets.IntSlider(
-                min=500,
-                max=10000,
-                description='Offset (m)',
-                value=self.model['rec'][0],
-                step=250,
-                continuous_update=False
-            ),
-        )
-
-        pts_per_dec = widgets.interactive(
-            self.update_pts_per_dec,
-            pts_per_dec=widgets.FloatSlider(
-                min=0.5,
-                max=10,
-                description='pts/decade',
-                value=self.pts_per_dec,
-                step=0.25,
-                continuous_update=False
-            ),
-        )
-
-        linlog = widgets.interactive(
-            self.update_linlog,
-            linlog=widgets.ToggleButtons(
-                value=self.linlog,
-                options=['linear', 'log'],
-                description='Scaling'),
-        )
-
-        int_type = widgets.interactive(
-            self.update_int_type,
-            int_type=widgets.ToggleButtons(
-                value=self.int_type,
-                options=[('Spline', 0), ('PCHIP', 1),
-                         ('PCHIP, then spline', 2)],
-                description='Interp. Type'
-            ),
-        )
-
-        freq_range = widgets.interactive(
-            self.update_freq_range,
-            freq_range=widgets.FloatRangeSlider(
-                value=[np.log10(self.min_freq), np.log10(self.max_freq)],
-                description='f-range (10^x)',
-                min=-4,
-                max=3,
-                step=0.1,
-                continuous_update=False
-            ),
-        )
-
-        use_end = widgets.interactive(
-            self.update_use_end,
-            use_end=widgets.Checkbox(
-                value=self.use_end,
-                description='Use +/- 1e-100',
-                layout={'width': '200px'},
-            ),
-        )
-
-        signal = widgets.interactive(
-            self.update_signal,
-            signal=widgets.ToggleButtons(
-                value=self.signal,
-                options=[-1, 0, 1],
-                description='Signal',
-            ),
-        )
-
-        ftfilt = widgets.interactive(
-            self.update_ftfilt,
-            ftfilt=widgets.Dropdown(
-                options=['key_81_CosSin_2009', 'key_241_CosSin_2009',
-                         'key_601_CosSin_2009', 'key_101_CosSin_2012',
-                         'key_201_CosSin_2012'],
-                description='Fourier DLF',
-                value=self.ftfilt,
-            ),
-        )
-
-        # Group them together
-        t1col1 = widgets.VBox(children=[off, pts_per_dec, freq_range, ftfilt],
-                              layout={'width': '390px'})
-        t1col2 = widgets.VBox(children=[int_type, use_end],
-                              layout={'width': '270px'})
-        t1col3 = widgets.VBox(children=[linlog, signal],
-                              layout={'width': '345px'})
-
-        # Group them together
-        display(widgets.HBox(children=[t1col1, t1col2, t1col3]))
-
-    # Plotting and calculation routines
-    def clear_handle(self, handles):
-        for hndl in handles:
-            if hasattr(self, 'h_'+hndl):
-                getattr(self, 'h_'+hndl).remove()
-
-    def adjust_lim(self):
-        """Adjust axes limits."""
-
-        # Adjust y-limits f-domain
-        if self.linlog == 'linear':
-            self.axs[0].set_ylim([1.1*min(self.reim(self.f_base)),
-                                  1.5*max(self.reim(self.f_base))])
-        else:
-            self.axs[0].set_ylim([5*min(self.reim(self.f_base)),
-                                  5*max(self.reim(self.f_base))])
-
-        # Adjust x-limits f-domain
-        self.axs[0].set_xlim([min(self.req_freq), max(self.req_freq)])
-
-        # Adjust y-limits t-domain
-        if self.linlog == 'linear':
-            self.axs[1].set_ylim(
-                    [min(-max(self.t_base)/20, 0.9*min(self.t_base)),
-                     max(-min(self.t_base)/20, 1.1*max(self.t_base))])
-        else:
-            self.axs[1].set_ylim([10**(np.log10(max(self.t_base))-5),
-                                  1.5*max(self.t_base)])
-
-        # Adjust x-limits t-domain
-        if self.linlog == 'linear':
-            if self.signal == 0:
-                self.axs[1].set_xlim([0, self.time[np.argmax(self.t_base)]*5])
-            else:
-                self.axs[1].set_xlim([0, max(self.time)])
-        else:
-            self.axs[1].set_xlim([min(self.time), max(self.time)])
-
-    def print_suptitle(self):
-        plt.suptitle(
-            f"Offset = {np.squeeze(self.model['rec'][0])/1000} km; # freq.: "
-            f"{self.coarse_freq[self.ind].size}; full range: "
-            f"{self.req_freq.size} freq. from {self.req_freq.min():.1e} Hz to "
-            f"{self.req_freq.max():.1e} Hz.", y=.98)
-
-    def plot_base_model(self):
-        """Update smooth, "correct" model."""
-
-        # Get required frequencies for coarse model.
-        time, req_freq, ft, ftarg = epm.utils.check_time(
-            time=self.time, signal=self.signal, ft=self.ft,
-            ftarg=[self.ftfilt, self.pts_per_dec_full], verb=1,
-        )
-
-        # Store required frequency range.
-        self.req_freq = req_freq
-
-        # Calculate responses
-        self.f_base = epm.dipole(
-            freqtime=req_freq,
-            xdirect=True,
-            ht='fht',
-            htarg={'pts_per_dec': -1},
-            **self.model,
-        )
-        self.t_base = epm.dipole(
-            freqtime=self.time,
-            xdirect=True,
-            signal=self.signal,
-            ht='fht',
-            htarg={'pts_per_dec': -1},
-            ft=ft,
-            ftarg=ftarg,
-            **self.model,
-        )
-
-        # Clear existing handles
-        self.clear_handle(['f_base', 't_base'])
-
-        # Plot new result
-        self.h_f_base, = self.axs[0].plot(
-                req_freq, self.reim(self.f_base), 'k')
-        self.h_t_base, = self.axs[1].plot(time, self.t_base, 'k')
-
-        self.adjust_lim()
-
-    def plot_coarse_model(self):
-        """Update interpolated model."""
-
-        # Get required frequencies for coarse model.
-        time, coarse_freq, ft, ftarg = epm.utils.check_time(
-            time=self.time, signal=self.signal, ft=self.ft,
-            ftarg=[self.ftfilt, self.pts_per_dec], verb=1,
-        )
-
-        # Get indices for restricted frequencies.
-        ind = (coarse_freq > self.min_freq) & (coarse_freq < self.max_freq)
-
-        # Calculate f-domain response for restricted frequencies
-        f_coarse = epm.dipole(freqtime=coarse_freq, xdirect=True, **self.model)
-
-        # Interpolate restricted frequencies
-        # Create temporary arrays without this frequency/field.
-        # (Adding 0-fields at 1e-100 and 1e100 Hz.)
-        if self.use_end:
-            tmp_f = np.r_[1e-100, coarse_freq[ind], 1e100]
-            tmp_s = np.r_[f_coarse[ind][0].real+0.0j, f_coarse[ind], 0]
-        else:
-            tmp_f = coarse_freq[ind]
-            tmp_s = f_coarse[ind]
-
-        # Interpolation
-        if self.int_type == 0:
-            re = iuSpline(np.log(tmp_f), tmp_s.real)(np.log(self.req_freq))
-            im = iuSpline(np.log(tmp_f), tmp_s.imag)(np.log(self.req_freq))
-        elif self.int_type == 1:
-            re = si.pchip_interpolate(tmp_f, tmp_s.real, self.req_freq)
-            im = si.pchip_interpolate(tmp_f, tmp_s.imag, self.req_freq)
-        else:
-            cre = si.pchip_interpolate(tmp_f, tmp_s.real, coarse_freq)
-            cim = si.pchip_interpolate(tmp_f, tmp_s.imag, coarse_freq)
-            re = iuSpline(np.log(coarse_freq), cre)(np.log(self.req_freq))
-            im = iuSpline(np.log(coarse_freq), cim)(np.log(self.req_freq))
-        f_int = re + 1j*im
-
-        # Calculate the f-domain error
-        f_error = np.zeros(self.req_freq.shape)
-        calc_error = np.abs(self.reim(self.f_base+f_int)) > 1e-40
-        all_error = 100*np.abs(
-                self.reim(self.f_base-f_int)/self.reim(self.f_base))
-        f_error[calc_error] = all_error[calc_error]
-
-        # Calculate corresponding time-domain signal.
-        t_int, _ = epm.model.tem(
-                f_int[:, None], self.model['rec'][0], freq=self.req_freq,
-                time=time, signal=self.signal, ft=ft, ftarg=ftarg)
-        t_int = np.squeeze(t_int)
-
-        # Calculate the t-domain error
-        t_error = np.zeros(self.time.shape)
-        calc_error = np.abs(self.t_base+t_int) > 1e-40
-        all_error = 100*np.abs((self.t_base-t_int)/self.t_base)
-        t_error[calc_error] = all_error[calc_error]
-
-        # Clear existing handles
-        self.clear_handle(['f_int', 't_int', 'f_inti', 'f_inte', 'f_inteh',
-                           'f_intel', 't_intel', 't_inteh', 't_inte'])
-
-        # Plot new f-domain result
-        self.h_f_inti, = self.axs[0].plot(
-                self.req_freq, self.reim(f_int), 'C0--')
-        self.h_f_int, = self.axs[0].plot(
-                coarse_freq[ind], self.reim(f_coarse[ind]), 'C1.', ms=8)
-        self.h_f_inte, = self.axs[2].plot(
-                self.req_freq, f_error, 'C1.')
-        self.h_f_inteh, = self.axs[2].plot(
-                self.req_freq[f_error > 100],
-                np.ones(f_error[f_error > 100].size)*110, 'C0.')
-        self.h_f_intel, = self.axs[2].plot(
-                self.req_freq[f_error < 0.01],
-                np.ones(f_error[f_error < 0.01].size)*0.009, 'C5.')
-
-        # Plot new t-domain result
-        self.h_t_int, = self.axs[1].plot(self.time, t_int, 'C0--')
-        self.h_t_inte, = self.axs[3].plot(self.time, t_error, 'C1.')
-        self.h_t_inteh, = self.axs[3].plot(
-                self.time[t_error > 100],
-                np.ones(t_error[t_error > 100].size)*110, 'C0.')
-        self.h_t_intel, = self.axs[3].plot(
-                self.time[t_error < 0.01],
-                np.ones(t_error[t_error < 0.01].size)*0.009, 'C5.')
-
-        # Store stuff.
-        self.coarse_freq = coarse_freq
-        self.f_coarse = f_coarse
-        self.f_int = f_int
-        self.t_int = t_int
-        self.ind = ind
-
-        # Update suptitle
-        self.print_suptitle()
-
-    # Interactive routines
-    def update_off(self, off):
-        """Offset-slider"""
-
-        # Update model
-        self.model['rec'] = [off, self.model['rec'][1], self.model['rec'][2]]
-
-        # Redraw models
-        self.plot_base_model()
-        self.plot_coarse_model()
-
-    def update_pts_per_dec(self, pts_per_dec):
-        """Pts_per_dec-slider."""
-
-        # Update model
-        self.pts_per_dec = pts_per_dec
-
-        # Redraw models
-        self.plot_coarse_model()
-
-    def update_freq_range(self, freq_range):
-        """Freq-range slider."""
-
-        # Update values
-        self.min_freq = 10**freq_range[0]
-        self.max_freq = 10**freq_range[1]
-
-        # Redraw models
-        self.plot_coarse_model()
-
-    def update_ftfilt(self, ftfilt):
-        """Ftfilt dropdown."""
-
-        # Update model
-        self.ftfilt = ftfilt
-
-        # Redraw models
-        self.plot_coarse_model()
-
-    def update_linlog(self, linlog):
-        """Adjust x- and y-scaling of both frequency- and time-domain."""
-
-        # Store linlog
-        self.linlog = linlog
-
-        # f-domain: x-axis always log; y-axis linear or symlog.
-        if linlog == 'log':
-            sym_dec = 10  # Number of decades to show on symlog
-            lty = max(np.log10(abs(self.reim(self.f_base))))-sym_dec
-            self.axs[0].set_yscale('symlog', linthreshy=10**lty)
-        else:
-            self.axs[0].set_yscale(linlog)
-
-        # t-domain: either linear or loglog
-        self.axs[1].set_yscale(linlog)
-        self.axs[1].set_xscale(linlog)
-
-        # Adjust limits
-        self.adjust_lim()
-
-    def update_use_end(self, use_end):
-        """Use zero-amplitude endpoints."""
-
-        # Store use_end
-        self.use_end = use_end
-
-        # Redraw
-        self.plot_coarse_model()
-
-    def update_int_type(self, int_type):
-        """Chose interpretation type."""
-
-        # Store int_type
-        self.int_type = int_type
-
-        # Redraw
-        self.plot_coarse_model()
-
-    def update_signal(self, signal):
-        """Use signal."""
-
-        # Store signal
-        self.signal = signal
-
-        # Adjust reim, ft
-        if signal < 0:
-            self.reim = np.real
-            self.ft = 'cos'
-        else:
-            self.reim = np.imag
-            self.ft = 'sin'
-
-        # Redraw
-        self.plot_base_model()
-        self.plot_coarse_model()
